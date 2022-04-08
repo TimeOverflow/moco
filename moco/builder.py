@@ -27,6 +27,7 @@ class MoCo(nn.Module):
         self.encoder_k = base_encoder(num_classes=dim)
 
         if mlp:  # hack: brute-force replacement
+            # 对于 ResNet18 来说，fc=Linear(512, 128), fc.weight.shape=(128, 512)
             dim_mlp = self.encoder_q.fc.weight.shape[1]
             self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
             self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
@@ -36,6 +37,8 @@ class MoCo(nn.Module):
             param_k.requires_grad = False  # not update by gradient
 
         # create the queue
+        # register_buffer 注册的参数不会被优化器更新，但是在保存模型时会被保存到 model.state_dict() 中
+        # 可以通过 model.buffers() 返回
         self.register_buffer("queue", torch.randn(dim, K))
         self.queue = nn.functional.normalize(self.queue, dim=0)
 
@@ -80,12 +83,14 @@ class MoCo(nn.Module):
 
         # random shuffle index
         idx_shuffle = torch.randperm(batch_size_all).cuda()
+        # 生成一个 shape=(batch_size_all,) 的 tensor，范围 0-batch_size_all 随机打乱
 
         # broadcast to all gpus
         torch.distributed.broadcast(idx_shuffle, src=0)
 
         # index for restoring
         idx_unshuffle = torch.argsort(idx_shuffle)
+        # 记录打乱的序号原来对应的顺序
 
         # shuffled index for this gpu
         gpu_idx = torch.distributed.get_rank()
@@ -167,8 +172,11 @@ def concat_all_gather(tensor):
     Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
     """
+    # get_world_size: Returns the number of processes in the current process group
+    # 也就是使用的所有 GPU 数量
     tensors_gather = [torch.ones_like(tensor)
         for _ in range(torch.distributed.get_world_size())]
+    # 将不同 GPU 上的 tensor 都放到 tensors_gather 这个 list 中，tensors_gather 应该预留相应的空间
     torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
 
     output = torch.cat(tensors_gather, dim=0)
