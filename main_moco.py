@@ -61,6 +61,9 @@ parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
+# 这里的 world_size 和 rank 是传参用的，跟 init_process_group 里的 world_size 和 rank 的含义不同
+# world_size 在这里是使用的机器数量，rank 在这里是机器的编号
+# 比如使用 4 台机器，那么在每台机器上运行时，就传参 --world_size 4，每台机器上依次设置 --rank 0, --rank 1, --rank 2, --rank 3
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
@@ -111,22 +114,31 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
+    # 多 GPU 时直接默认用 None
     if args.gpu is not None:
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
+    # 如果使用 "env://" 作为 init_method，一般不会在运行的命令行语句中加 --world_size，
+    # 所以 world_size 这时就是默认值 1
     if args.dist_url == "env://" and args.world_size == -1:
         args.world_size = int(os.environ["WORLD_SIZE"])
 
+    # 如果 args.world_size > 1，说明机器数大于 1，那肯定是 distributed
+    # 如果 world_size=1，下面语句只看后面一个条件
+    # 命令行中会设置 multiprocessing-distributed=True，所以 args.distributed=True
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
+        # 这里开始，world_size 就表示所有机器上的 GPU 总数了
         args.world_size = ngpus_per_node * args.world_size
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
+        # mp.spawn: Spawns nprocs processes that run fn with args
+        # fn 的签名形式为 fn(i, *args), where i is the process index and args is the passed through tuple of arguments.
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
     else:
         # Simply call main_worker function
@@ -134,6 +146,7 @@ def main():
 
 
 def main_worker(gpu, ngpus_per_node, args):
+    # args.gpu 表示当前进程序号，每张卡上会自动分配，不需要手动管理，应该是等同于 local_rank
     args.gpu = gpu
 
     # suppress printing if not master
@@ -146,19 +159,28 @@ def main_worker(gpu, ngpus_per_node, args):
         print("Use GPU: {} for training".format(args.gpu))
 
     if args.distributed:
+        # 命令行中指定 rank 为 机器编号
         if args.dist_url == "env://" and args.rank == -1:
+            # 使用 init_method="env://" 时，命令行不传参 --rank，则 args.rank 默认为 1
+            # 此时 init_process_group 里的 rank 由环境变量自动获得
             args.rank = int(os.environ["RANK"])
         if args.multiprocessing_distributed:
             # For multiprocessing distributed training, rank needs to be the
             # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
+            # 用于多机多卡或者单机多卡时命令行传参 --rank
+            # 这里把 args.rank 从机器编号转换为进程的全局序号，gpu 这里就代表 local_rank
+            # 第 0 台机器上，args.rank 本来为 0，现在编程 0 * ngpus_per_node + local_rank
+            # 第 1 台机器上，args.rank 本来为 1，现在编程 1 * ngpus_per_node + local_rank
+            # 以此类推
+            args.rank = args.rank * ngpus_per_node + gpu  # rank 表示进程顺序，单卡时应该与 local_rank 是一样的
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
     # create model
     print("=> creating model '{}'".format(args.arch))
     model = moco.builder.MoCo(
         models.__dict__[args.arch],
-        args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
+        args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp
+    )
     print(model)
 
     if args.distributed:
@@ -284,7 +306,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, losses, top1, top5],
-        prefix="Epoch: [{}]".format(epoch))
+        prefix="Epoch: [{}]".format(epoch)
+    )
 
     # switch to train mode
     model.train()
